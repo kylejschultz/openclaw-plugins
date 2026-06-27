@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 
 const ACTIONS = new Set(["status", "panel", "search", "series", "queue", "issues", "indexers", "missing", "history"]);
-const PANEL_ACTIONS = new Set(["status", "missing", "queue", "issues", "search", "reset"]);
+const PANEL_ACTIONS = new Set(["status", "missing", "queue", "issues", "reset"]);
 const DEFAULT_PANEL_CHANNEL_ID = "1519062371413262367";
 const DEFAULT_MEDIA_MCP_URL = "http://127.0.0.1:3300/mcp";
 const MEDIA_MCP_DIR = "/Users/server/.openclaw/workspace/media-mcp";
@@ -20,6 +20,7 @@ const PANEL_AUTO_RESET_MS = 20 * 60 * 1000;
 const PANEL_REPAIR_INTERVAL_MS = 12 * 60 * 60 * 1000;
 const REQUEST_FOLLOW_INTERVAL_MS = 15 * 1000;
 const REQUEST_FOLLOW_MAX_POLLS = 80;
+const DISCORD_COMPONENTS_V2_FLAG = 32768;
 
 const GUIDANCE = [
   {
@@ -74,10 +75,11 @@ function mediaPanelReply() {
   };
 }
 
-function panelButton(label, action, style = "secondary") {
+function panelButton(label, action, style = "secondary", emoji) {
   return {
     label,
     style,
+    ...(emoji ? { emoji } : {}),
     reusable: true,
     callbackData: `media-panel:${action}`,
     callbackDataKind: "callback"
@@ -86,45 +88,77 @@ function panelButton(label, action, style = "secondary") {
 
 function searchModalSpec(triggerLabel = "Search", options = {}) {
   const kind = options.kind === "series" ? "series" : options.kind === "movie" ? "movie" : "media";
+  const triggerStyle = options.triggerStyle === "success" ? "success"
+    : options.triggerStyle === "secondary" ? "secondary"
+      : options.triggerStyle === "danger" ? "danger"
+        : "primary";
+  const titleField = {
+    type: "text",
+    name: "query",
+    label: kind === "series" ? "Series title" : kind === "movie" ? "Movie title" : "Title",
+    placeholder: kind === "series" ? "Foundation" : kind === "movie" ? "The Matrix" : "Alien, Foundation, Sugar",
+    required: true,
+    minLength: 1,
+    maxLength: 120
+  };
   return {
     title: kind === "series" ? "Search Series" : kind === "movie" ? "Search Movies" : "Search Media",
     triggerLabel,
-    triggerStyle: "primary",
-    callbackData: kind === "series" ? "media-panel:series-search" : "media-panel:search",
-    fields: [
+    triggerStyle,
+    callbackData: kind === "series" ? "media-panel:series-search" : kind === "movie" ? "media-panel:movie-search" : "media-panel:search",
+    fields: kind === "media" ? [
       {
-        type: "text",
-        name: "query",
-        label: kind === "series" ? "Series title" : kind === "movie" ? "Movie title" : "Movie or TV title",
-        placeholder: kind === "series" ? "Foundation" : kind === "movie" ? "The Matrix" : "Alien, Foundation, Sugar",
+        type: "select",
+        name: "kind",
+        label: "Type",
         required: true,
-        minLength: 1,
-        maxLength: 120
-      }
-    ]
+        minValues: 1,
+        maxValues: 1,
+        options: [
+          { label: "Movie", value: "movie" },
+          { label: "TV", value: "series" }
+        ]
+      },
+      titleField
+    ] : [titleField]
   };
 }
 
 function panelComponents() {
   return {
+    panelHome: true,
     reusable: true,
     container: { accentColor: "#2f81f7" },
     text: [
       "## Media Stack",
-      "Pick an action. Status-style buttons update through Zoidberg; Search opens a request form."
+      "Pick an action. Search opens a request form."
     ].join("\n"),
     blocks: [
       {
         type: "actions",
         buttons: [
-          panelButton("Status", "status", "primary"),
-          panelButton("Queue", "queue"),
-          panelButton("Missing", "missing"),
-          panelButton("Issues", "issues", "danger")
+          panelButton("Status", "status", "primary", "📊"),
+          panelButton("Search", "search-kind", "success", "🔎"),
+          panelButton("Queue", "queue", "secondary", "⏳"),
+          panelButton("Missing", "missing", "primary", "🧩"),
+          panelButton("Issues", "issues", "danger", "🚨")
         ]
       }
     ],
-    modal: searchModalSpec("Search")
+    modal: searchModalSpec("Search", { triggerStyle: "success" })
+  };
+}
+
+function movieSearchPanelComponents() {
+  return {
+    reusable: true,
+    container: { accentColor: "#2f81f7" },
+    text: [
+      "## Movie Search",
+      "Search for a movie to add through Radarr."
+    ].join("\n"),
+    blocks: [movieFooterBlock()],
+    modal: searchModalSpec("Search Movies", { kind: "movie" })
   };
 }
 
@@ -184,15 +218,20 @@ function encodePanelRequestState(request) {
   return Buffer.from(JSON.stringify(normalized), "utf8").toString("base64url");
 }
 
+function optionalPositiveNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : undefined;
+}
+
 function encodePanelFollowState(track) {
   const service = track?.service === "sonarr" ? "sonarr" : "radarr";
   const normalized = {
     service,
-    tmdbId: Number(track?.tmdbId),
-    tvdbId: Number(track?.tvdbId),
+    tmdbId: optionalPositiveNumber(track?.tmdbId),
+    tvdbId: optionalPositiveNumber(track?.tvdbId),
     title: String(track?.title ?? ""),
-    year: Number(track?.year) || undefined,
-    expectedEpisodeCount: Number(track?.expectedEpisodeCount) || undefined,
+    year: optionalPositiveNumber(track?.year),
+    expectedEpisodeCount: optionalPositiveNumber(track?.expectedEpisodeCount),
     monitorMode: typeof track?.monitorMode === "string" ? track.monitorMode : undefined,
     polls: Number(track?.polls ?? 0)
   };
@@ -229,11 +268,11 @@ function decodePanelFollowState(value) {
     if (!Number(parsed.tmdbId) && !Number(parsed.tvdbId) && !title) return undefined;
     return {
       service: parsed.service === "sonarr" || Number(parsed.tvdbId) ? "sonarr" : "radarr",
-      tmdbId: Number(parsed.tmdbId),
-      tvdbId: Number(parsed.tvdbId),
+      tmdbId: optionalPositiveNumber(parsed.tmdbId),
+      tvdbId: optionalPositiveNumber(parsed.tvdbId),
       title,
-      year: Number(parsed.year) || undefined,
-      expectedEpisodeCount: Number(parsed.expectedEpisodeCount) || undefined,
+      year: optionalPositiveNumber(parsed.year),
+      expectedEpisodeCount: optionalPositiveNumber(parsed.expectedEpisodeCount),
       monitorMode: typeof parsed.monitorMode === "string" ? parsed.monitorMode : undefined,
       polls: Number(parsed.polls ?? 0)
     };
@@ -434,8 +473,9 @@ function withPanelFooter(spec, action) {
   };
 }
 
-function withMovieControls(spec) {
+function withMovieControls(spec, options = {}) {
   const blocks = Array.isArray(spec?.blocks) ? spec.blocks : [];
+  const kind = options.kind === "series" ? "series" : options.kind === "movie" ? "movie" : "media";
   return sanitizeComponentSpec({
     ...spec,
     reusable: true,
@@ -443,7 +483,7 @@ function withMovieControls(spec) {
       ...sanitizeBlocks(blocks),
       movieFooterBlock()
     ],
-    modal: searchModalSpec("Search Again")
+    modal: searchModalSpec(kind === "series" ? "Search TV Again" : kind === "movie" ? "Search Movies Again" : "Search Again", { kind })
   });
 }
 
@@ -559,7 +599,7 @@ function rewritePreviewRequestButtonForPanel(spec, result) {
     ...spec,
     reusable: true,
     blocks: requestButtonFound ? nextBlocks : [...nextBlocks, moviePreviewActionBlock(request, writeEnabled)],
-    modal: searchModalSpec("Search Again")
+    modal: searchModalSpec(requestKind(request) === "series" ? "Search TV Again" : "Search Movies Again", { kind: requestKind(request) })
   };
 }
 
@@ -777,14 +817,32 @@ async function loadDiscordRuntimeApi() {
         "dist",
         "runtime-api.send.js"
       );
+      const apiCandidate = join(
+        projectsDir,
+        entry.name,
+        "node_modules",
+        "@openclaw",
+        "discord",
+        "dist",
+        "api.js"
+      );
       try {
         await readFile(candidate);
-        return await import(pathToFileURL(candidate).href);
+        await readFile(apiCandidate);
+        const [sendModule, apiModule] = await Promise.all([
+          import(pathToFileURL(candidate).href),
+          import(pathToFileURL(apiCandidate).href)
+        ]);
+        return {
+          ...sendModule,
+          buildDiscordComponentMessage: apiModule.buildDiscordComponentMessage,
+          resolveDiscordAccount: apiModule.resolveDiscordAccount
+        };
       } catch {
         // Keep scanning; OpenClaw npm project ids include content hashes.
       }
     }
-    throw new Error("Unable to locate installed @openclaw/discord runtime-api.send.js");
+    throw new Error("Unable to locate installed @openclaw/discord runtime API");
   })();
   return discordRuntimeApiPromise;
 }
@@ -1007,7 +1065,8 @@ function rewriteSearchSelectForPanel(spec, kind = "movie") {
           }))
         }
       };
-    })
+    }),
+    modal: searchModalSpec(kind === "series" ? "Search TV Again" : "Search Movies Again", { kind })
   };
 }
 
@@ -1016,6 +1075,138 @@ function sanitizeSectionBlock(block) {
   if (block?.type !== "section" || block.accessory) return block;
   const texts = Array.isArray(block.texts) ? block.texts : [block.text].filter(Boolean);
   return textBlock(texts.join("\n"));
+}
+
+function buildOrderedPanelHome(accountId, buildDiscordComponentMessage) {
+  const baseSpec = {
+    ...panelComponents(),
+    modal: undefined
+  };
+  const base = buildDiscordComponentMessage({
+    spec: baseSpec,
+    fallbackText: baseSpec.text,
+    accountId
+  });
+  const modalSpec = {
+    reusable: true,
+    text: "Search",
+    blocks: [],
+    modal: searchModalSpec("Search", { triggerStyle: "success" })
+  };
+  const modal = buildDiscordComponentMessage({
+    spec: modalSpec,
+    fallbackText: "Search",
+    accountId
+  });
+  const modalButton = modal.components?.[0]?.components
+    ?.find((component) => Array.isArray(component?.components))
+    ?.components?.[0];
+  const row = base.components?.[0]?.components
+    ?.find((component) => Array.isArray(component?.components) && component.components.some((button) => button?.label === "Search"));
+  if (!modalButton || !row) throw new Error("Unable to build ordered media panel search modal trigger.");
+  modalButton.emoji = "🔎";
+  const searchIndex = row.components.findIndex((button) => button?.label === "Search");
+  if (searchIndex < 0) throw new Error("Unable to place media panel search modal trigger.");
+  row.components[searchIndex] = modalButton;
+  const searchEntryIds = new Set(
+    base.entries
+      .filter((entry) => entry?.label === "Search")
+      .map((entry) => entry.id)
+  );
+  const entries = [
+    ...base.entries.filter((entry) => !searchEntryIds.has(entry.id)),
+    ...modal.entries
+  ];
+  return {
+    components: base.components,
+    entries,
+    modals: modal.modals
+  };
+}
+
+function discordWireComponent(component) {
+  if (!component || typeof component !== "object") return component;
+  if (typeof component.serialize === "function") return discordWireComponent(component.serialize());
+  if (component.type === 17) {
+    const accentColor = typeof component.accent_color === "number" ? component.accent_color
+      : typeof component.accentColor === "number" ? component.accentColor
+      : typeof component.accentColor === "string" && /^#?[0-9a-f]{6}$/i.test(component.accentColor)
+        ? Number.parseInt(component.accentColor.replace(/^#/, ""), 16)
+        : undefined;
+    return {
+      type: 17,
+      ...(accentColor !== undefined ? { accent_color: accentColor } : {}),
+      ...(component.spoiler !== undefined ? { spoiler: component.spoiler } : {}),
+      components: Array.isArray(component.components) ? component.components.map(discordWireComponent) : []
+    };
+  }
+  if (component.type === 10) {
+    return {
+      type: 10,
+      content: String(component.content ?? "")
+    };
+  }
+  if (component.type === 1) {
+    return {
+      type: 1,
+      components: Array.isArray(component.components) ? component.components.map(discordWireComponent) : []
+    };
+  }
+  if (component.type === 2) {
+    const customId = component.custom_id ?? component.customId;
+    return {
+      type: 2,
+      style: component.style,
+      label: component.label,
+      custom_id: customId,
+      disabled: component.disabled === true,
+      ...(component.emoji ? { emoji: typeof component.emoji === "string" ? { name: component.emoji } : component.emoji } : {})
+    };
+  }
+  return component;
+}
+
+async function editOrderedPanelHome(api, channelId, messageId, reason, accountId) {
+  const {
+    buildDiscordComponentMessage,
+    registerBuiltDiscordComponentMessage,
+    resolveDiscordAccount
+  } = await loadDiscordRuntimeApi();
+  const resolvedAccount = resolveDiscordAccount({
+    cfg: api.config,
+    accountId
+  });
+  const buildResult = buildOrderedPanelHome(resolvedAccount.accountId, buildDiscordComponentMessage);
+  const response = await fetch(`https://discord.com/api/v10/channels/${channelId}/messages/${messageId}`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bot ${resolvedAccount.token}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      components: buildResult.components.map(discordWireComponent),
+      flags: DISCORD_COMPONENTS_V2_FLAG
+    })
+  });
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(`Discord panel edit failed (${response.status}): ${truncateText(body, 500)}`);
+  }
+  const edited = await response.json();
+  registerBuiltDiscordComponentMessage({
+    buildResult,
+    messageId: edited.id ?? messageId
+  });
+  const nextState = {
+    channelId,
+    messageId: edited.id ?? messageId,
+    accountId: resolvedAccount.accountId,
+    updatedAt: new Date().toISOString(),
+    reason,
+    mode: "edit"
+  };
+  await writePanelState(nextState);
+  return { ok: true, ...nextState };
 }
 
 async function editResidentPanel(api, spec, reason = "panel-action") {
@@ -1027,6 +1218,10 @@ async function editResidentPanel(api, spec, reason = "panel-action") {
   const configuredMessageId = typeof config.panelMessageId === "string" ? config.panelMessageId.trim() : "";
   const knownMessageId = configuredMessageId || (state.channelId === channelId && typeof state.messageId === "string" ? state.messageId : "");
   if (!knownMessageId) return ensureResidentPanel(api, reason);
+
+  if (spec?.panelHome === true) {
+    return editOrderedPanelHome(api, channelId, knownMessageId, reason, accountId);
+  }
 
   const { editDiscordComponentMessage } = await loadDiscordRuntimeApi();
   const edited = await editDiscordComponentMessage(target, knownMessageId, spec, { cfg: api.config, accountId });
@@ -1054,12 +1249,6 @@ async function updatePanelFromAction(api, action, input = "") {
   clearPanelRequestFollow();
   await editResidentPanel(api, panelWorkingComponents(`${actionLabel(action)} loading`), `working:${action}`);
   try {
-    if (action === "search") {
-      const components = await combinedSearchComponents(api, input);
-      await editResidentPanel(api, components, `result:search:${input}`);
-      schedulePanelAutoReset(api, action);
-      return;
-    }
     const tool = panelToolForAction(action, input);
     const result = await callMediaTool(api, tool.name, tool.args);
     const components = action === "search" || action === "series"
@@ -1090,7 +1279,7 @@ async function updatePanelFromPreview(api, tmdbId, requestInput, options = {}) {
     schedulePanelAutoReset(api, `preview:${tmdbId}`);
   } catch (error) {
     api.logger.warn(`media panel preview failed: ${String(error)}`);
-    await editResidentPanel(api, withMovieControls(panelErrorComponents("search", error)), `error:preview:${tmdbId}`);
+    await editResidentPanel(api, withMovieControls(panelErrorComponents("search", error), { kind: "movie" }), `error:preview:${tmdbId}`);
     schedulePanelAutoReset(api, `error:preview:${tmdbId}`);
   }
 }
@@ -1111,7 +1300,7 @@ async function updatePanelFromSeriesPreview(api, tvdbId, requestInput, options =
     schedulePanelAutoReset(api, `series-preview:${tvdbId}`);
   } catch (error) {
     api.logger.warn(`media panel series preview failed: ${String(error)}`);
-    await editResidentPanel(api, withMovieControls(panelErrorComponents("series", error)), `error:series-preview:${tvdbId}`);
+    await editResidentPanel(api, withMovieControls(panelErrorComponents("series", error), { kind: "series" }), `error:series-preview:${tvdbId}`);
     schedulePanelAutoReset(api, `error:series-preview:${tvdbId}`);
   }
 }
@@ -1272,7 +1461,7 @@ function requestFollowComponents(track, status) {
       textBlock(details),
       requestFollowControls(track, complete)
     ],
-    modal: searchModalSpec("Search Again")
+    modal: searchModalSpec(track.service === "sonarr" ? "Search TV Again" : "Search Movies Again", { kind: track.service === "sonarr" ? "series" : "movie" })
   };
 }
 
@@ -1280,11 +1469,11 @@ async function updatePanelFromFollow(api, track, options = {}) {
   const service = track?.service === "sonarr" || Number(track?.tvdbId) ? "sonarr" : "radarr";
   const normalizedTrack = {
     service,
-    tmdbId: Number(track?.tmdbId),
-    tvdbId: Number(track?.tvdbId),
+    tmdbId: optionalPositiveNumber(track?.tmdbId),
+    tvdbId: optionalPositiveNumber(track?.tvdbId),
     title: String(track?.title ?? ""),
-    year: Number(track?.year) || undefined,
-    expectedEpisodeCount: Number(track?.expectedEpisodeCount) || undefined,
+    year: optionalPositiveNumber(track?.year),
+    expectedEpisodeCount: optionalPositiveNumber(track?.expectedEpisodeCount),
     monitorMode: typeof track?.monitorMode === "string" ? track.monitorMode : undefined,
     polls: Number(track?.polls ?? 0)
   };
@@ -1337,7 +1526,7 @@ function panelDryRunRequestComponents(result) {
       ].join("\n")),
       movieFooterBlock()
     ],
-    modal: searchModalSpec("Search Again")
+    modal: searchModalSpec(kind === "series" ? "Search TV Again" : "Search Movies Again", { kind })
   };
 }
 
@@ -1376,7 +1565,7 @@ async function updatePanelFromRequest(api, requestOrTmdb) {
     });
   } catch (error) {
     api.logger.warn(`media panel request failed: ${String(error)}`);
-    await editResidentPanel(api, withMovieControls(panelErrorComponents(kind === "series" ? "series" : "search", error)), `error:request:${kind}:${entityId}`);
+    await editResidentPanel(api, withMovieControls(panelErrorComponents(kind === "series" ? "series" : "search", error), { kind }), `error:request:${kind}:${entityId}`);
     schedulePanelAutoReset(api, `error:request:${kind}:${entityId}`);
   }
 }
@@ -1395,18 +1584,7 @@ async function ensureResidentPanel(api, reason = "startup") {
 
   if (knownMessageId) {
     try {
-      const { editDiscordComponentMessage } = await loadDiscordRuntimeApi();
-      const edited = await editDiscordComponentMessage(target, knownMessageId, spec, { cfg: api.config, accountId });
-      const nextState = {
-        channelId,
-        messageId: edited.messageId ?? knownMessageId,
-        accountId: accountId ?? "default",
-        updatedAt: new Date().toISOString(),
-        reason,
-        mode: "edit"
-      };
-      await writePanelState(nextState);
-      return { ok: true, ...nextState };
+      return await editOrderedPanelHome(api, channelId, knownMessageId, reason, accountId);
     } catch (error) {
       api.logger.warn(`media panel edit failed; sending replacement: ${String(error)}`);
     }
@@ -1464,6 +1642,25 @@ function firstModalFieldValue(fields) {
     }
   }
   return "";
+}
+
+function modalFieldValue(fields, name) {
+  if (!Array.isArray(fields)) return "";
+  const target = String(name ?? "");
+  const field = fields.find((entry) => String(entry?.name ?? "") === target || String(entry?.id ?? "") === target);
+  if (!field) return "";
+  if (typeof field.value === "string") return field.value.trim();
+  if (Array.isArray(field.values)) {
+    const value = field.values.find((entry) => typeof entry === "string" && entry.trim());
+    return value ? value.trim() : "";
+  }
+  return "";
+}
+
+function normalizeSearchKind(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (["series", "tv", "television", "show", "shows"].includes(normalized)) return "series";
+  return "movie";
 }
 
 const MEDIA_COMMAND_ARGS = [
@@ -1730,10 +1927,27 @@ export default definePluginEntry({
         }
 
         if (normalized === "search") {
-          const query = firstModalFieldValue(ctx?.interaction?.fields);
+          const query = modalFieldValue(ctx?.interaction?.fields, "query") || firstModalFieldValue(ctx?.interaction?.fields);
           if (!query) {
             await ctx.respond.reply({
-              text: "Search needs a movie or TV title.",
+              text: "Search needs a title.",
+              ephemeral: true
+            });
+            return { handled: true };
+          }
+          const kind = normalizeSearchKind(modalFieldValue(ctx?.interaction?.fields, "kind"));
+          await ctx.respond.acknowledge();
+          void updatePanelFromAction(api, kind === "series" ? "series" : "search", query).catch((error) => {
+            api.logger.warn(`media panel ${kind === "series" ? "series" : "search"} update failed: ${String(error)}`);
+          });
+          return { handled: true };
+        }
+
+        if (normalized === "movie-search") {
+          const query = modalFieldValue(ctx?.interaction?.fields, "query") || firstModalFieldValue(ctx?.interaction?.fields);
+          if (!query) {
+            await ctx.respond.reply({
+              text: "Search needs a movie title.",
               ephemeral: true
             });
             return { handled: true };
@@ -1746,7 +1960,7 @@ export default definePluginEntry({
         }
 
         if (normalized === "series-search") {
-          const query = firstModalFieldValue(ctx?.interaction?.fields);
+          const query = modalFieldValue(ctx?.interaction?.fields, "query") || firstModalFieldValue(ctx?.interaction?.fields);
           if (!query) {
             await ctx.respond.reply({
               text: "Search needs a series title.",
@@ -1758,6 +1972,18 @@ export default definePluginEntry({
           void updatePanelFromAction(api, "series", query).catch((error) => {
             api.logger.warn(`media panel series search update failed: ${String(error)}`);
           });
+          return { handled: true };
+        }
+
+        if (normalized === "search-kind") {
+          await ctx.respond.acknowledge();
+          await editResidentPanel(api, panelComponents(), "search-kind");
+          return { handled: true };
+        }
+
+        if (normalized === "movie") {
+          await ctx.respond.acknowledge();
+          await editResidentPanel(api, movieSearchPanelComponents(), "movie-search");
           return { handled: true };
         }
 
