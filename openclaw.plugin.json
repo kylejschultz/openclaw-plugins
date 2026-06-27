@@ -1,0 +1,52 @@
+{
+  "id": "media-commands",
+  "name": "Media Commands",
+  "description": "Persistent Discord media panel and media stack shortcuts.",
+  "version": "0.5.1",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "panelChannelId": {
+        "type": "string",
+        "description": "Discord channel id for the resident media panel message."
+      },
+      "panelMessageId": {
+        "type": "string",
+        "description": "Optional fixed Discord message id to edit instead of using plugin state."
+      },
+      "accountId": {
+        "type": "string",
+        "description": "Optional Discord account id."
+      },
+      "mediaMcpUrl": {
+        "type": "string",
+        "description": "Media MCP Streamable HTTP URL used by panel-triggered MVP actions."
+      },
+      "autoPost": {
+        "type": "boolean",
+        "description": "Post or repair the resident panel on plugin startup."
+      }
+    }
+  },
+  "activation": {
+    "onStartup": true,
+    "onCommands": [
+      "media",
+      "media-panel"
+    ]
+  },
+  "contracts": {},
+  "commandAliases": [
+    {
+      "name": "media",
+      "kind": "runtime-slash",
+      "cliCommand": "media"
+    },
+    {
+      "name": "media-panel",
+      "kind": "runtime-slash",
+      "cliCommand": "media-panel"
+    }
+  ]
+}
