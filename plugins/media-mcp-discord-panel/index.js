@@ -17,7 +17,7 @@ let panelAutoResetTimer;
 let panelRequestFollowTimer;
 
 const PANEL_AUTO_RESET_MS = 20 * 60 * 1000;
-const PANEL_REPAIR_INTERVAL_MS = 12 * 60 * 60 * 1000;
+const PANEL_REPAIR_INTERVAL_MS = 20 * 60 * 1000;
 const REQUEST_FOLLOW_INTERVAL_MS = 15 * 1000;
 const REQUEST_FOLLOW_MAX_POLLS = 80;
 const DISCORD_COMPONENTS_V2_FLAG = 32768;
