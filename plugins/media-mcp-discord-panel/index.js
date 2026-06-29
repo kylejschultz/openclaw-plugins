@@ -28,15 +28,15 @@ const GUIDANCE = [
     text: [
       "When the user invokes /media, parse the first word as the media action and the rest as action input. Example: `/media search matrix` means action `search` with query `matrix`.",
       "- status or empty: run media_stack_overview and show a compact Discord-friendly component/status view when possible.",
-      "- search <query>: run search_movie with the query text after `search`, and render selectable movie results as Discord components when component-ready data is returned.",
-      "- series <query>: run search_series with the query text after `series`, and render selectable series results as Discord components when component-ready data is returned.",
+      "- search <query>: run search_movie with the query text after `search`, and render selectable movie results from the neutral `candidates`, `requestDraft`, and `view` payloads.",
+      "- series <query>: run search_series with the query text after `series`, and render selectable series results from the neutral `candidates`, `requestDraft`, and `view` payloads.",
       "- queue: run download_queue and summarize Sonarr, Radarr, Lidarr, and SABnzbd queue items.",
       "- issues: run get_import_issues and service_health, then summarize actionable issues.",
       "- indexers: run indexer_status and summarize enabled, disabled, failed, or warning indexers.",
       "- missing: run get_missing_summary and summarize wanted/missing media.",
       "- history: run recent_activity and summarize recent stack activity.",
       "- panel: repair or refresh the persistent Discord Components v2 media control panel.",
-      "For Discord responses, prefer OpenClaw presentation/components when a media tool returns component-ready data; keep a concise text fallback for surfaces that cannot render components.",
+      "For Discord responses, prefer OpenClaw presentation/components by rendering the MCP tool's neutral `view` and `requestDraft` payloads; keep a concise text fallback for surfaces that cannot render components.",
       "Do not paste raw component JSON into the visible message. Use the supported Discord component send path when available, and fall back to the text summary otherwise.",
       "If no action is provided, default to status."
     ].join("\n")
@@ -301,7 +301,7 @@ function requestEntityLabel(request) {
   return requestKind(request) === "series" ? "series" : "movie";
 }
 
-function moviePreviewActionBlock(request, writeEnabled = false) {
+function moviePreviewActionBlock(request, writeEnabled = false, disabled = false) {
   const label = requestEntityLabel(request);
   return {
     type: "actions",
@@ -310,16 +310,13 @@ function moviePreviewActionBlock(request, writeEnabled = false) {
         label: writeEnabled ? `Request ${label}` : "Dry run request",
         style: writeEnabled ? "success" : "secondary",
         reusable: true,
+        disabled,
         callbackData: requestStateCallback("request", request),
         callbackDataKind: "callback"
       },
       panelButton("Reset", "reset")
     ]
   };
-}
-
-function hasPanelResetButton(buttons) {
-  return Array.isArray(buttons) && buttons.some((button) => String(button?.callbackData ?? "") === "media-panel:reset");
 }
 
 function panelWorkingComponents(label) {
@@ -548,59 +545,65 @@ function panelRequestOptionBlocks(formFields, request) {
   return blocks;
 }
 
-function rewritePreviewRequestButtonForPanel(spec, result) {
-  if (!spec || typeof spec !== "object") return spec;
-  const request = result?.requestDraft?.request;
-  const entityId = requestEntityId(request);
-  const label = requestEntityLabel(request);
-  const writeEnabled = Boolean(result?.requestDraft?.writeGate?.enabled);
-  const blocks = Array.isArray(spec.blocks) ? spec.blocks : [];
-  if (!entityId) return spec;
-  let requestButtonFound = false;
-  const formFields = Array.isArray(result?.requestDraft?.formFields)
-    ? result.requestDraft.formFields
-    : blocks.find((block) => block?.type === "form" && Array.isArray(block.fields))?.fields;
-  const optionBlocks = panelRequestOptionBlocks(formFields, request);
-  const nextBlocks = [];
-  for (const block of blocks) {
-    if (block?.type === "form") {
-      nextBlocks.push(...optionBlocks);
-      continue;
-    }
-    const buttons = Array.isArray(block?.buttons) ? block.buttons : undefined;
-    if (!buttons) {
-      const sanitized = sanitizeSectionBlock(block);
-      if (sanitized) nextBlocks.push(sanitized);
-      continue;
-    }
-    let blockHasRequestButton = false;
-    const nextButtons = buttons.map((button) => {
-      if (!String(button?.callbackData ?? "").toLowerCase().includes("request")) {
-        return button;
-      }
-      requestButtonFound = true;
-      blockHasRequestButton = true;
-      return {
-        ...button,
-        label: writeEnabled ? `Request ${label}` : "Dry run request",
-        style: writeEnabled ? "success" : "secondary",
-        disabled: false,
-        callbackData: requestStateCallback("request", request),
-        callbackDataKind: "callback"
-      };
-    });
-    nextBlocks.push({
-      ...sanitizeSectionBlock(block),
-      buttons: nextButtons.concat(blockHasRequestButton && !hasPanelResetButton(buttons) ? [panelButton("Reset", "reset")] : [])
-    });
-  }
+function selectedRequestCandidate(result) {
+  const draft = result?.requestDraft && typeof result.requestDraft === "object" ? result.requestDraft : {};
+  return draft.selectedCandidate && typeof draft.selectedCandidate === "object" ? draft.selectedCandidate : {};
+}
 
-  return {
-    ...spec,
+function optionLabelById(options, id, fallback) {
+  if (!Array.isArray(options)) return fallback;
+  const match = options.find((option) =>
+    String(option?.id ?? "") === String(id)
+    || Number(option?.id) === Number(id)
+    || String(option?.path ?? "") === String(id)
+  );
+  return match?.label ?? match?.name ?? match?.path ?? fallback;
+}
+
+function previewRequestComponents(result) {
+  const draft = result?.requestDraft && typeof result.requestDraft === "object" ? result.requestDraft : {};
+  const request = draft.request && typeof draft.request === "object" ? draft.request : {};
+  const kind = draft.kind === "series" || Number(request.tvdbId) ? "series" : "movie";
+  const candidate = selectedRequestCandidate(result);
+  const title = candidate.title ?? (kind === "series" ? "Selected series" : "Selected movie");
+  const year = candidate.year ? ` (${candidate.year})` : "";
+  const writeEnabled = Boolean(draft?.writeGate?.enabled);
+  const warnings = Array.isArray(result?.warnings) ? result.warnings : [];
+  const disabled = warnings.length > 0 && writeEnabled;
+  const quality = optionLabelById(draft.qualityProfileOptions, request.qualityProfileId, request.qualityProfileId ?? "default");
+  const root = optionLabelById(draft.rootFolderOptions, request.rootFolderPath, request.rootFolderPath ?? "default");
+  const monitor = optionLabelById(draft.monitorOptions, request.monitorMode, request.monitorMode ?? "all");
+  const details = [
+    `Quality: ${quality}`,
+    `Root: ${root}`,
+    kind === "series" ? `Monitor: ${monitor}` : `Monitored: ${request.monitored !== false ? "yes" : "no"}`,
+    kind === "series" ? `Season folders: ${request.seasonFolder !== false ? "yes" : "no"}` : undefined,
+    `Search now: ${request.searchNow !== false ? "yes" : "no"}`,
+    warnings[0] ? `Warning: ${warnings[0]}` : undefined,
+    !writeEnabled ? "ALLOW_REQUESTS is false; submit runs as a dry run." : undefined
+  ].filter(Boolean).join("\n");
+  return sanitizeComponentSpec({
     reusable: true,
-    blocks: requestButtonFound ? nextBlocks : [...nextBlocks, moviePreviewActionBlock(request, writeEnabled)],
-    modal: searchModalSpec(requestKind(request) === "series" ? "Search TV Again" : "Search Movies Again", { kind: requestKind(request) })
-  };
+    container: { accentColor: disabled || !writeEnabled ? "#9a6700" : "#1a7f37" },
+    text: [
+      kind === "series" ? "## Series Request Preview" : "## Movie Request Preview",
+      truncateText(result?.summary ?? `Preview ready for ${title}${year}.`, 900)
+    ].join("\n"),
+    blocks: [
+      {
+        type: "section",
+        texts: [
+          `**${truncateText(`${title}${year}`, 100)}**`,
+          truncateText(result?.summary ?? "", 300),
+          details
+        ].filter(Boolean),
+        accessory: mediaPoster(candidate, kind)
+      },
+      ...panelRequestOptionBlocks(draft.formFields, request),
+      moviePreviewActionBlock(request, writeEnabled, disabled)
+    ],
+    modal: searchModalSpec(kind === "series" ? "Search TV Again" : "Search Movies Again", { kind })
+  });
 }
 
 function titleCaseFromKey(value) {
@@ -706,9 +709,7 @@ function groupedQueueComponents(result) {
 
   const grouped = [...groups.values()];
   if (grouped.length === 0) {
-    const fallback = result?.components && typeof result.components === "object"
-      ? withPanelFooter(result.components, "queue")
-      : viewToComponents(result, "queue");
+    const fallback = viewToComponents(result, "queue");
     return withQueueFollowControls(fallback, result);
   }
   const activeItems = grouped.reduce((sum, group) => sum + Math.max(group.episodes.size || 0, 1), 0);
@@ -771,10 +772,82 @@ function withQueueFollowControls(spec, result) {
 
 function resultToComponents(result, action) {
   if (action === "queue") return sanitizeComponentSpec(groupedQueueComponents(result));
-  const components = result?.components && typeof result.components === "object"
-    ? withPanelFooter(result.components, action)
+  const components = action === "search" || action === "series"
+    ? searchResultComponents(result, action === "series" ? "series" : "movie")
     : viewToComponents(result, action);
   return sanitizeComponentSpec(components);
+}
+
+function mediaPoster(candidate, kind) {
+  const url = typeof candidate?.remotePoster === "string" && candidate.remotePoster
+    ? candidate.remotePoster
+    : Array.isArray(candidate?.images)
+      ? candidate.images.find((image) => image?.coverType === "poster" && typeof image?.remoteUrl === "string")?.remoteUrl
+      : undefined;
+  return url ? { type: "thumbnail", url } : undefined;
+}
+
+function searchOptionLabel(kind, candidate) {
+  const title = String(candidate?.title ?? "Untitled");
+  const year = candidate?.year ? ` (${candidate.year})` : "";
+  return truncateText(`${title}${year}`, 100);
+}
+
+function searchOptionDescription(kind, candidate) {
+  const pieces = [
+    candidate?.alreadyExists || candidate?.isExisting ? `Already in ${kind === "series" ? "Sonarr" : "Radarr"}` : undefined,
+    kind === "series" ? candidate?.network : undefined,
+    Array.isArray(candidate?.genres) ? candidate.genres.slice(0, 2).join(", ") : undefined,
+    kind === "movie" ? candidate?.certification : undefined
+  ].filter(Boolean);
+  return pieces.length > 0 ? truncateText(pieces.join(" | "), 100) : undefined;
+}
+
+function searchResultComponents(result, kind = "movie") {
+  const draftCandidates = Array.isArray(result?.requestDraft?.candidateOptions) ? result.requestDraft.candidateOptions : [];
+  const candidates = Array.isArray(result?.candidates) && result.candidates.length ? result.candidates : draftCandidates;
+  if (candidates.length === 0) return viewToComponents(result, kind === "series" ? "series" : "search");
+  const first = candidates[0];
+  const options = candidates.slice(0, 25).map((candidate) => {
+    const id = kind === "series" ? Number(candidate?.tvdbId) : Number(candidate?.tmdbId);
+    return id ? {
+      label: searchOptionLabel(kind, candidate),
+      value: kind === "series" ? `media-panel:series-preview:${id}` : `media-panel:preview:${id}`,
+      description: searchOptionDescription(kind, candidate)
+    } : undefined;
+  }).filter(Boolean);
+  if (options.length === 0) return viewToComponents(result, kind === "series" ? "series" : "search");
+  const title = kind === "series" ? "TV Search" : "Movie Search";
+  const placeholder = kind === "series" ? "Choose a series to preview" : "Choose a movie to preview";
+  return {
+    reusable: true,
+    container: { accentColor: "#2f81f7" },
+    text: [
+      `## ${title}`,
+      truncateText(result?.summary ?? `${options.length} results found.`, 900)
+    ].join("\n"),
+    blocks: [
+      {
+        type: "section",
+        text: truncateText(result?.summary ?? "Pick the exact match to preview.", 300),
+        accessory: mediaPoster(first, kind)
+      },
+      {
+        type: "actions",
+        select: {
+          type: "string",
+          placeholder,
+          minValues: 1,
+          maxValues: 1,
+          callbackData: kind === "series" ? "media-panel:series-preview" : "media-panel:preview",
+          callbackDataKind: "callback",
+          options
+        }
+      },
+      movieFooterBlock()
+    ],
+    modal: searchModalSpec(kind === "series" ? "Search TV Again" : "Search Movies Again", { kind })
+  };
 }
 
 function panelChannelId(config = {}) {
@@ -1271,11 +1344,7 @@ async function updatePanelFromPreview(api, tmdbId, requestInput, options = {}) {
   }
   try {
     const result = await previewMovieForPanel(api, tmdbId, requestInput);
-    const components = rewritePreviewRequestButtonForPanel(
-      result?.components && typeof result.components === "object" ? result.components : viewToComponents(result, "search"),
-      result
-    );
-    await editResidentPanel(api, components, `result:preview:${tmdbId}`);
+    await editResidentPanel(api, previewRequestComponents(result), `result:preview:${tmdbId}`);
     schedulePanelAutoReset(api, `preview:${tmdbId}`);
   } catch (error) {
     api.logger.warn(`media panel preview failed: ${String(error)}`);
@@ -1292,11 +1361,7 @@ async function updatePanelFromSeriesPreview(api, tvdbId, requestInput, options =
   }
   try {
     const result = await previewSeriesForPanel(api, tvdbId, requestInput);
-    const components = rewritePreviewRequestButtonForPanel(
-      result?.components && typeof result.components === "object" ? result.components : viewToComponents(result, "series"),
-      result
-    );
-    await editResidentPanel(api, components, `result:series-preview:${tvdbId}`);
+    await editResidentPanel(api, previewRequestComponents(result), `result:series-preview:${tvdbId}`);
     schedulePanelAutoReset(api, `series-preview:${tvdbId}`);
   } catch (error) {
     api.logger.warn(`media panel series preview failed: ${String(error)}`);

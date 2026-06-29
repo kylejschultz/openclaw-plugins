@@ -6,6 +6,11 @@ The panel owns Discord component routing, modal handling, message edits, and
 polling timers. The `media-mcp` server owns media-stack data normalization,
 request previews, gated writes, and request lifecycle status.
 
+The panel renders Discord components locally from the server's neutral
+`view`, `candidates`, `requestDraft`, `payloadPreview`, and `followStatus`
+payloads. The server should not emit Discord component IDs, modal routes,
+message edit instructions, or resident panel state.
+
 ## Live Install
 
 The active OpenClaw plugin path is:
@@ -27,6 +32,8 @@ resident Discord message.
 - Movie searches route to Radarr. TV searches route to Sonarr.
 - Search results, previews, option changes, request writes, and follow-up
   status all edit the resident panel in place.
+- Search and preview controls are built in this plugin from `requestDraft`
+  fields and selected request payloads.
 - The panel refreshes itself every 20 minutes so Discord component/modal IDs do
   not expire between normal uses.
 - The panel may be manually repaired with `/media panel` or `/media-panel`.
