@@ -11,6 +11,9 @@ The panel renders Discord components locally from the server's neutral
 payloads. The server should not emit Discord component IDs, modal routes,
 message edit instructions, or resident panel state.
 
+See [`CLIENT_CONTRACT.md`](CLIENT_CONTRACT.md) for the exact mapping from MCP
+tool payloads to Discord panel controls.
+
 ## Live Install
 
 The active OpenClaw plugin path is:
