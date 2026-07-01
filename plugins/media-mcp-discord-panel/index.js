@@ -361,16 +361,19 @@ function schedulePanelAutoReset(api, reason) {
   }, PANEL_AUTO_RESET_MS);
 }
 
-function schedulePanelRequestFollow(api, track) {
+function schedulePanelRequestFollow(api, track, delaySeconds) {
   clearPanelRequestFollow();
   const nextPolls = Number(track?.polls ?? 0) + 1;
   if (nextPolls > REQUEST_FOLLOW_MAX_POLLS) return;
+  const requestedDelayMs = Number.isFinite(Number(delaySeconds))
+    ? Math.min(60_000, Math.max(5_000, Number(delaySeconds) * 1000))
+    : REQUEST_FOLLOW_INTERVAL_MS;
   panelRequestFollowTimer = setTimeout(() => {
     panelRequestFollowTimer = undefined;
     updatePanelFromFollow(api, { ...track, polls: nextPolls }, { scheduled: true }).catch((error) => {
       api.logger.warn(`media panel request follow failed: ${String(error)}`);
     });
-  }, REQUEST_FOLLOW_INTERVAL_MS);
+  }, requestedDelayMs);
 }
 
 function panelErrorComponents(action, error) {
@@ -1482,13 +1485,30 @@ async function updatePanelFromToggle(api, fieldId, request) {
   }
 }
 
-function requestFollowControls(track, complete = false) {
+function followPhaseLabel(phase) {
+  const value = String(phase ?? "").trim();
+  if (!value) return "Requested";
+  return value
+    .split(/[_\s-]+/)
+    .filter(Boolean)
+    .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1).toLowerCase()}`)
+    .join(" ");
+}
+
+function followHeader(noun, status) {
+  if (status?.failed) return `## ${noun} Request Needs Attention`;
+  if (status?.phase === "imported" || status?.complete) return `## ${noun} Imported`;
+  return `## ${noun} Request - ${followPhaseLabel(status?.phase)}`;
+}
+
+function requestFollowControls(track, status = {}) {
+  const terminal = Boolean(status?.terminal ?? status?.complete ?? status?.failed);
   return {
     type: "actions",
     buttons: [
       {
-        label: complete ? "Refresh" : "Check Now",
-        style: complete ? "secondary" : "primary",
+        label: terminal ? "Refresh" : "Check Now",
+        style: status?.failed ? "danger" : terminal ? "secondary" : "primary",
         reusable: true,
         callbackData: followStateCallback(track),
         callbackDataKind: "callback"
@@ -1501,30 +1521,51 @@ function requestFollowControls(track, complete = false) {
 function requestFollowComponents(track, status) {
   const complete = Boolean(status?.complete);
   const failed = Boolean(status?.failed);
-  const accentColor = failed ? "#d1242f" : complete ? "#1a7f37" : "#2f81f7";
+  const terminal = Boolean(status?.terminal ?? (complete || failed));
+  const accentColor = failed ? "#d1242f" : complete ? "#1a7f37" : status?.phase === "importing" ? "#9a6700" : "#2f81f7";
   const noun = track.service === "sonarr" ? "Series" : "Movie";
   const idDetail = track.service === "sonarr"
     ? (track.tvdbId ? `TVDB ${track.tvdbId}` : "tracked title")
     : (track.tmdbId ? `TMDB ${track.tmdbId}` : "tracked title");
+  const queueCount = status?.queueCount && typeof status.queueCount === "object" ? status.queueCount : {};
+  const historyCount = status?.historyCount && typeof status.historyCount === "object" ? status.historyCount : {};
+  const expectedEpisodes = Number(status?.expectedEpisodeCount);
+  const importedEpisodes = Number(status?.importedCount);
+  const activeCount = Number(status?.activeCount);
+  const episodeCountLine = Number.isFinite(expectedEpisodes) && expectedEpisodes > 0
+    ? `Episodes: ${Number.isFinite(importedEpisodes) ? Math.min(importedEpisodes, expectedEpisodes) : 0}/${expectedEpisodes} imported${Number.isFinite(activeCount) && activeCount > 0 ? `, ${activeCount} active` : ""}`
+    : undefined;
+  const queueLine = queueCount.total !== undefined || historyCount.service !== undefined
+    ? `Sources: queue ${Number(queueCount.total ?? 0)}, history ${Number(historyCount.service ?? 0)}${Number(historyCount.sabnzbd ?? 0) > 0 ? `, SAB history ${Number(historyCount.sabnzbd)}` : ""}`
+    : undefined;
+  const pollLine = terminal
+    ? "Polling: stopped"
+    : status?.nextPollRecommended === false
+      ? "Polling: not recommended"
+      : `Polling: ${status?.pollDelaySeconds ? `next check ~${status.pollDelaySeconds}s` : "active"}`;
   const details = [
     `${noun}: ${track.title || idDetail}${track.year ? ` (${track.year})` : ""}`,
+    `Phase: ${followPhaseLabel(status.phase)}`,
     `Status: ${status.label}`,
+    episodeCountLine,
+    queueLine,
     status.episodeDetail,
     status.detail,
     status.progress !== undefined ? `Progress: ${status.progress}%` : undefined,
     status.eta ? `ETA: ${status.eta}` : undefined,
+    pollLine,
     status.polls !== undefined ? `Updated: ${new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", second: "2-digit" })}` : undefined
   ].filter(Boolean).join("\n");
   return {
     reusable: true,
     container: { accentColor },
     text: [
-      complete ? `## ${noun} Imported` : failed ? `## ${noun} Request Needs Attention` : `## ${noun} Request`,
+      followHeader(noun, status),
       status.summary
     ].join("\n"),
     blocks: [
       textBlock(details),
-      requestFollowControls(track, complete)
+      requestFollowControls(track, status)
     ],
     modal: searchModalSpec(track.service === "sonarr" ? "Search TV Again" : "Search Movies Again", { kind: track.service === "sonarr" ? "series" : "movie" })
   };
@@ -1550,8 +1591,9 @@ async function updatePanelFromFollow(api, track, options = {}) {
     ? result.followStatus
     : { label: "Requested", summary: result?.summary ?? "Waiting for request status.", polls: normalizedTrack.polls };
   await editResidentPanel(api, requestFollowComponents(normalizedTrack, status), `follow:request:${service}:${normalizedTrack.tvdbId || normalizedTrack.tmdbId}`);
-  if (!status.complete && normalizedTrack.polls < REQUEST_FOLLOW_MAX_POLLS) {
-    schedulePanelRequestFollow(api, normalizedTrack);
+  const terminal = Boolean(status?.terminal ?? (status?.complete || status?.failed));
+  if (!terminal && status?.nextPollRecommended !== false && normalizedTrack.polls < REQUEST_FOLLOW_MAX_POLLS) {
+    schedulePanelRequestFollow(api, normalizedTrack, status.pollDelaySeconds);
   }
 }
 

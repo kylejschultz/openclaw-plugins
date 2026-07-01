@@ -43,7 +43,9 @@ The plugin must not require the server to return top-level `components`.
   `requestDraft`, `payloadPreview`, and warnings.
 - Request write: `request_movie` or `request_series`, called only from the
   plugin's confirmed callback state.
-- Follow status: `request_follow_status`, rendered from `followStatus`.
+- Follow status: `request_follow_status`, rendered from
+  `followStatus.schema`, `phase`, `terminal`, counts, polling hints, and the
+  existing label/summary fields.
 
 ## State Encoding
 
@@ -63,3 +65,11 @@ not appear in server responses.
 When `requestDraft.writeGate.enabled` is false, the plugin shows a dry-run
 button and does not attempt a real write. When writes are enabled but preview
 warnings exist, the plugin disables the real write button.
+
+## Follow Controls
+
+The panel treats `followStatus.phase` as the display state and
+`followStatus.terminal` as the stop condition. When
+`followStatus.nextPollRecommended` is false, the panel does not schedule another
+automatic check. When `pollDelaySeconds` is present, the panel uses it as a
+bounded polling delay hint.

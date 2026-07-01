@@ -37,6 +37,8 @@ resident Discord message.
   status all edit the resident panel in place.
 - Search and preview controls are built in this plugin from `requestDraft`
   fields and selected request payloads.
+- Follow-up status renders `followStatus.phase`, episode/source counts, and
+  polling hints from `media-mcp.followStatus.v1`.
 - The panel refreshes itself every 20 minutes so Discord component/modal IDs do
   not expire between normal uses.
 - The panel may be manually repaired with `/media panel` or `/media-panel`.
