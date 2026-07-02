@@ -20,8 +20,8 @@ The active OpenClaw plugin path is:
 
 `/Users/server/.openclaw/workspace/openclaw-plugins/plugins/media-mcp-discord-panel`
 
-After changing this repo, copy `index.js`, `package.json`, and
-`openclaw.plugin.json` to that path and restart the OpenClaw gateway.
+After changing this repo, restart the OpenClaw gateway. OpenClaw loads the
+plugin directly from this path.
 
 Do not commit `media-panel-state.json`; it is local runtime state for the
 resident Discord message.
@@ -41,4 +41,5 @@ resident Discord message.
   polling hints from `media-mcp.followStatus.v1`.
 - The panel refreshes itself every 20 minutes so Discord component/modal IDs do
   not expire between normal uses.
-- The panel may be manually repaired with `/media panel` or `/media-panel`.
+- The panel no longer registers Discord slash commands; use the resident panel
+  buttons and modals.

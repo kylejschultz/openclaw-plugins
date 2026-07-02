@@ -1,9 +1,9 @@
 {
   "name": "openclaw-plugin-media-commands",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "type": "module",
   "private": true,
-  "description": "OpenClaw persistent Discord media panel and media stack shortcuts.",
+  "description": "OpenClaw persistent Discord media stack control panel.",
   "peerDependencies": {
     "openclaw": ">=2026.6.8"
   },

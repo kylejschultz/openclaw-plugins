@@ -4,7 +4,6 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 
-const ACTIONS = new Set(["status", "panel", "search", "series", "queue", "issues", "indexers", "missing", "history"]);
 const PANEL_ACTIONS = new Set(["status", "missing", "queue", "issues", "reset"]);
 const DEFAULT_PANEL_CHANNEL_ID = "1519062371413262367";
 const DEFAULT_MEDIA_MCP_URL = "http://127.0.0.1:3300/mcp";
@@ -21,59 +20,6 @@ const PANEL_REPAIR_INTERVAL_MS = 20 * 60 * 1000;
 const REQUEST_FOLLOW_INTERVAL_MS = 15 * 1000;
 const REQUEST_FOLLOW_MAX_POLLS = 80;
 const DISCORD_COMPONENTS_V2_FLAG = 32768;
-
-const GUIDANCE = [
-  {
-    surfaces: ["openclaw_main", "codex_app_server"],
-    text: [
-      "When the user invokes /media, parse the first word as the media action and the rest as action input. Example: `/media search matrix` means action `search` with query `matrix`.",
-      "- status or empty: run media_stack_overview and show a compact Discord-friendly component/status view when possible.",
-      "- search <query>: run search_movie with the query text after `search`, and render selectable movie results from the neutral `candidates`, `requestDraft`, and `view` payloads.",
-      "- series <query>: run search_series with the query text after `series`, and render selectable series results from the neutral `candidates`, `requestDraft`, and `view` payloads.",
-      "- queue: run download_queue and summarize Sonarr, Radarr, Lidarr, and SABnzbd queue items.",
-      "- issues: run get_import_issues and service_health, then summarize actionable issues.",
-      "- indexers: run indexer_status and summarize enabled, disabled, failed, or warning indexers.",
-      "- missing: run get_missing_summary and summarize wanted/missing media.",
-      "- history: run recent_activity and summarize recent stack activity.",
-      "- panel: repair or refresh the persistent Discord Components v2 media control panel.",
-      "For Discord responses, prefer OpenClaw presentation/components by rendering the MCP tool's neutral `view` and `requestDraft` payloads; keep a concise text fallback for surfaces that cannot render components.",
-      "Do not paste raw component JSON into the visible message. Use the supported Discord component send path when available, and fall back to the text summary otherwise.",
-      "If no action is provided, default to status."
-    ].join("\n")
-  }
-];
-
-function parseMediaInput(ctx) {
-  const values = ctx?.commandBody?.values ?? ctx?.values;
-  const actionValue = typeof values?.action === "string" ? values.action.trim() : "";
-  const inputValue = typeof values?.input === "string" ? values.input.trim() : "";
-  const queryValue = typeof values?.query === "string" ? values.query.trim() : "";
-  if (actionValue) return parseRawMediaInput([actionValue, inputValue || queryValue].filter(Boolean).join(" "));
-
-  const structuredInput = typeof values?.input === "string" ? values.input.trim() : "";
-  const legacyAction = typeof values?.action === "string" ? values.action.trim() : "";
-  const legacyQuery = typeof values?.query === "string" ? values.query.trim() : "";
-  if (structuredInput) return parseRawMediaInput(structuredInput);
-  if (legacyAction) return { action: legacyAction.toLowerCase(), input: legacyQuery };
-  const raw = typeof ctx?.args === "string" ? ctx.args : "";
-  return parseRawMediaInput(raw);
-}
-
-function parseRawMediaInput(raw) {
-  const trimmed = typeof raw === "string" ? raw.trim() : "";
-  if (!trimmed) return { action: "status", input: "" };
-  const [first = "", ...rest] = trimmed.split(/\s+/);
-  const action = first.toLowerCase();
-  if (!ACTIONS.has(action)) return { action: "status", input: trimmed };
-  return { action, input: rest.join(" ").trim() };
-}
-
-function mediaPanelReply() {
-  return {
-    continueAgent: false,
-    text: "Repairing the persistent media panel..."
-  };
-}
 
 function panelButton(label, action, style = "secondary", emoji) {
   return {
@@ -1770,39 +1716,6 @@ function normalizeSearchKind(value) {
   return "movie";
 }
 
-const MEDIA_COMMAND_ARGS = [
-  {
-    name: "action",
-    description: "status, panel, search, series, queue, issues, indexers, missing, or history",
-    type: "string",
-    choices: ["status", "panel", "search", "series", "queue", "issues", "indexers", "missing", "history"]
-  },
-  {
-    name: "input",
-    description: "Search query or extra input",
-    type: "string",
-    captureRemaining: true
-  }
-];
-
-function handleMediaAction(action, input) {
-  if (action === "panel") {
-    return mediaPanelReply();
-  }
-
-  if ((action === "search" || action === "series") && !input) {
-    return {
-      continueAgent: false,
-      text: "Use `/media search <movie title>`, `/media series <series title>`, or `/media-panel` for the panel."
-    };
-  }
-
-  return {
-    continueAgent: true,
-    text: action === "search" || action === "series" ? `Searching media for "${input}"...` : `Checking media ${action}...`
-  };
-}
-
 export default definePluginEntry({
   id: "media-commands",
   name: "Media Commands",
@@ -2116,46 +2029,5 @@ export default definePluginEntry({
       }
     });
 
-    api.registerCommand({
-      name: "media",
-      description: "Check media stack status, open panel, search, queue, issues, indexers, missing, or history.",
-      acceptsArgs: true,
-      args: MEDIA_COMMAND_ARGS,
-      argsMenu: "auto",
-      requireAuth: true,
-      agentPromptGuidance: GUIDANCE,
-      handler: async (ctx) => {
-        const { action, input } = parseMediaInput(ctx);
-        if (action === "panel") {
-          const result = await ensureResidentPanel(api, "command");
-          return {
-            continueAgent: false,
-            text: result.ok
-              ? `Media panel ${result.mode === "edit" ? "refreshed" : "posted"} in <#${result.channelId}>.`
-              : `Media panel repair skipped: ${result.skipped ?? "unknown reason"}.`
-          };
-        }
-        return handleMediaAction(action, input);
-      }
-    });
-
-    api.registerCommand({
-      name: "media-panel",
-      description: "Open the persistent media control panel.",
-      acceptsArgs: false,
-      requireAuth: true,
-      nativeProgressMessages: {
-        default: "Repairing media panel..."
-      },
-      handler: async () => {
-        const result = await ensureResidentPanel(api, "command");
-        return {
-          continueAgent: false,
-          text: result.ok
-            ? `Media panel ${result.mode === "edit" ? "refreshed" : "posted"} in <#${result.channelId}>.`
-            : `Media panel repair skipped: ${result.skipped ?? "unknown reason"}.`
-        };
-      }
-    });
   }
 });
