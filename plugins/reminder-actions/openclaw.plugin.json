@@ -1,0 +1,14 @@
+{
+  "id": "reminder-actions",
+  "name": "Reminder Actions",
+  "description": "Slack modal handlers for YAML-backed reminder actions.",
+  "version": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  },
+  "activation": {
+    "onStartup": true
+  }
+}

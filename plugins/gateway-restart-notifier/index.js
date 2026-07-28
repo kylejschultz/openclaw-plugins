@@ -8,7 +8,7 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
 const STATE_PATH = join(PLUGIN_DIR, "restart-notifier-state.json");
 const HANDOFF_FILENAME = "gateway-supervisor-restart-handoff.json";
-const DEFAULT_CHANNEL_ID = "1516325131243229244";
+const DEFAULT_DISCORD_CHANNEL_ID = "1516325131243229244";
 const DEFAULT_STARTUP_DELAY_MS = 5000;
 const DEFAULT_MAX_HANDOFF_AGE_MS = 10 * 60 * 1000;
 const DEFAULT_RECOVERY_WATCH_DELAY_MS = 2 * 60 * 1000;
@@ -39,10 +39,16 @@ function uniqueStrings(values) {
   return [...new Set(values.map(asString).filter(Boolean))];
 }
 
-function configuredChannelIds(config) {
+function configuredDiscordChannelIds(config) {
+  if (Array.isArray(config.channelIds) && config.channelIds.length === 0 && !asString(config.channelId)) return [];
   const fromList = Array.isArray(config.channelIds) ? config.channelIds : [];
   const configured = uniqueStrings([...fromList, config.channelId]);
-  return configured.length > 0 ? configured : [DEFAULT_CHANNEL_ID];
+  return configured.length > 0 ? configured : [DEFAULT_DISCORD_CHANNEL_ID];
+}
+
+function configuredSlackChannelIds(config) {
+  const fromList = Array.isArray(config.slackChannelIds) ? config.slackChannelIds : [];
+  return uniqueStrings([...fromList, config.slackChannelId]);
 }
 
 function validHandoff(value, now = Date.now(), maxAgeMs = DEFAULT_MAX_HANDOFF_AGE_MS) {
@@ -148,6 +154,36 @@ function alertComponents(handoff) {
       }
     ]
   };
+}
+
+function slackAlertBlocks(handoff) {
+  const unix = Math.floor(handoff.createdAt / 1000);
+  const age = formatAge(Date.now() - handoff.createdAt);
+  return [
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: [
+          "*Gateway Restarted*",
+          `Back online after a supervised restart at <!date^${unix}^{time}|${new Date(handoff.createdAt).toISOString()}>.`
+        ].join("\n")
+      }
+    },
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: [
+          `*Restart*: ${handoff.restartKind || "unknown"} via ${handoff.supervisorMode || "unknown"}`,
+          `*Source*: ${handoff.source || "unknown"}`,
+          handoff.reason ? `*Reason*: ${handoff.reason}` : null,
+          `*Process*: ${handoff.pid} -> ${process.pid}`,
+          `*Detected*: ${age} after handoff`
+        ].filter(Boolean).join("\n")
+      }
+    }
+  ];
 }
 
 function displaySessionName(sessionKey, entry) {
@@ -277,7 +313,48 @@ function recoveryWatchComponents(handoff, stage, problems, rows) {
   };
 }
 
+function slackRecoveryWatchBlocks(handoff, stage, problems, rows) {
+  const unix = Math.floor(handoff.createdAt / 1000);
+  const okCount = rows.filter((row) => row.state.level === "ok").length;
+  const problemLines = problems.slice(0, 8).map((problem) => {
+    const run = problem.run?.runId ? `\nrun: \`${problem.run.runId}\`` : "";
+    return `*${problem.name}*\n${problem.state.label}${run}`;
+  });
+  return [
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: [
+          "*Gateway Recovery Watchdog*",
+          `Restart at <!date^${unix}^{time}|${new Date(handoff.createdAt).toISOString()}> needs attention.`
+        ].join("\n")
+      }
+    },
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: [
+          `*Stage*: ${stage}`,
+          `*Recovered sessions observed*: ${rows.length}`,
+          `*Completed cleanly*: ${okCount}`,
+          `*Issues*: ${problems.length}`
+        ].join("\n")
+      }
+    },
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: problemLines.join("\n\n") || "No problem sessions."
+      }
+    }
+  ];
+}
+
 async function sendDiscordAlert(api, handoff, channelIds, accountId) {
+  if (channelIds.length === 0) return;
   const adapter = await api.runtime.channel.outbound.loadAdapter("discord");
   if (!adapter?.sendPayload) throw new Error("Discord outbound adapter with sendPayload is not available");
   const text = formatMessage(handoff);
@@ -300,6 +377,7 @@ async function sendDiscordAlert(api, handoff, channelIds, accountId) {
 }
 
 async function sendRecoveryWatchAlert(api, handoff, channelIds, accountId, stage, problems, rows) {
+  if (channelIds.length === 0) return;
   const adapter = await api.runtime.channel.outbound.loadAdapter("discord");
   if (!adapter?.sendPayload) throw new Error("Discord outbound adapter with sendPayload is not available");
   const text = recoverySummaryText(handoff, stage, problems, rows);
@@ -321,19 +399,97 @@ async function sendRecoveryWatchAlert(api, handoff, channelIds, accountId, stage
   }
 }
 
-async function maybeNotify(api, handoff, channelIds, accountId) {
+async function sendSlackAlert(api, handoff, channelIds, accountId) {
+  if (channelIds.length === 0) return;
+  const adapter = await api.runtime.channel.outbound.loadAdapter("slack");
+  if (!adapter?.sendPayload) throw new Error("Slack outbound adapter with sendPayload is not available");
+  const text = formatMessage(handoff);
+  for (const channelId of channelIds) {
+    await adapter.sendPayload({
+      cfg: api.config,
+      to: `channel:${channelId}`,
+      text,
+      accountId,
+      payload: {
+        text,
+        channelData: {
+          slack: {
+            blocks: slackAlertBlocks(handoff)
+          }
+        }
+      }
+    });
+  }
+}
+
+async function sendSlackRecoveryWatchAlert(api, handoff, channelIds, accountId, stage, problems, rows) {
+  if (channelIds.length === 0) return;
+  const adapter = await api.runtime.channel.outbound.loadAdapter("slack");
+  if (!adapter?.sendPayload) throw new Error("Slack outbound adapter with sendPayload is not available");
+  const text = recoverySummaryText(handoff, stage, problems, rows);
+  for (const channelId of channelIds) {
+    await adapter.sendPayload({
+      cfg: api.config,
+      to: `channel:${channelId}`,
+      text,
+      accountId,
+      payload: {
+        text,
+        channelData: {
+          slack: {
+            blocks: slackRecoveryWatchBlocks(handoff, stage, problems, rows)
+          }
+        }
+      }
+    });
+  }
+}
+
+async function notifyAllDestinations(tasks) {
+  const errors = [];
+  let attempts = 0;
+  for (const task of tasks) {
+    if (task.enabled) {
+      attempts += 1;
+      try {
+        await task.run();
+      } catch (error) {
+        errors.push(`${task.name}: ${String(error)}`);
+      }
+    }
+  }
+  if (attempts > 0 && errors.length === attempts) {
+    throw new Error(errors.join("; "));
+  }
+  return errors;
+}
+
+async function maybeNotify(api, handoff, destinations) {
   const state = await readState();
   if (state.lastIntentId === handoff.intentId) return;
-  await sendDiscordAlert(api, handoff, channelIds, accountId);
+  const errors = await notifyAllDestinations([
+    {
+      name: "discord",
+      enabled: destinations.discordChannelIds.length > 0,
+      run: () => sendDiscordAlert(api, handoff, destinations.discordChannelIds, destinations.discordAccountId)
+    },
+    {
+      name: "slack",
+      enabled: destinations.slackChannelIds.length > 0,
+      run: () => sendSlackAlert(api, handoff, destinations.slackChannelIds, destinations.slackAccountId)
+    }
+  ]);
+  for (const error of errors) api.logger.warn(`gateway restart notification partial failure: ${error}`);
   await writeState({
     lastIntentId: handoff.intentId,
     lastNotifiedAt: new Date().toISOString(),
-    lastChannelIds: channelIds,
+    lastChannelIds: destinations.discordChannelIds,
+    lastSlackChannelIds: destinations.slackChannelIds,
     lastHandoff: handoff
   });
 }
 
-async function maybeNotifyRecoveryWatch(api, handoff, channelIds, accountId, stage, options) {
+async function maybeNotifyRecoveryWatch(api, handoff, destinations, stage, options) {
   const store = await readSessionsStore(options.sessionsPath);
   const { rows, problems } = recoveryProblemSessions(store, handoff, stage, options.minRunningMs);
   if (problems.length === 0) return;
@@ -344,7 +500,19 @@ async function maybeNotifyRecoveryWatch(api, handoff, channelIds, accountId, sta
   const notifyKey = `${handoff.intentId}:${stage}:${problemKey}`;
   if (notified[notifyKey]) return;
 
-  await sendRecoveryWatchAlert(api, handoff, channelIds, accountId, stage, problems, rows);
+  const errors = await notifyAllDestinations([
+    {
+      name: "discord",
+      enabled: destinations.discordChannelIds.length > 0,
+      run: () => sendRecoveryWatchAlert(api, handoff, destinations.discordChannelIds, destinations.discordAccountId, stage, problems, rows)
+    },
+    {
+      name: "slack",
+      enabled: destinations.slackChannelIds.length > 0,
+      run: () => sendSlackRecoveryWatchAlert(api, handoff, destinations.slackChannelIds, destinations.slackAccountId, stage, problems, rows)
+    }
+  ]);
+  for (const error of errors) api.logger.warn(`gateway recovery watch partial failure: ${error}`);
   await writeState({
     ...state,
     recoveryWatchNotified: {
@@ -369,11 +537,15 @@ async function maybeNotifyRecoveryWatch(api, handoff, channelIds, accountId, sta
 export default definePluginEntry({
   id: "gateway-restart-notifier",
   name: "Gateway Restart Notifier",
-  description: "Post a Discord alert when the OpenClaw Gateway comes back after a supervised restart.",
+  description: "Post alerts when the OpenClaw Gateway comes back after a supervised restart.",
   register(api) {
     const config = api.pluginConfig ?? {};
-    const channelIds = configuredChannelIds(config);
-    const accountId = asString(config.accountId) || undefined;
+    const destinations = {
+      discordChannelIds: configuredDiscordChannelIds(config),
+      discordAccountId: asString(config.accountId) || undefined,
+      slackChannelIds: configuredSlackChannelIds(config),
+      slackAccountId: asString(config.slackAccountId) || undefined
+    };
     const startupDelayMs = asPositiveNumber(config.startupDelayMs, DEFAULT_STARTUP_DELAY_MS);
     const maxHandoffAgeMs = asPositiveNumber(config.maxHandoffAgeMs, DEFAULT_MAX_HANDOFF_AGE_MS);
     const recoveryWatchEnabled = config.recoveryWatchEnabled !== false;
@@ -397,18 +569,18 @@ export default definePluginEntry({
     readPendingHandoff(maxHandoffAgeMs).then((handoff) => {
       if (!handoff) return;
       schedule(() => {
-        maybeNotify(api, handoff, channelIds, accountId).catch((error) => {
+        maybeNotify(api, handoff, destinations).catch((error) => {
           api.logger.warn(`gateway restart notification failed: ${String(error)}`);
         });
       }, startupDelayMs);
       if (recoveryWatchEnabled) {
         schedule(() => {
-          maybeNotifyRecoveryWatch(api, handoff, channelIds, accountId, "watch", recoveryWatchOptions).catch((error) => {
+          maybeNotifyRecoveryWatch(api, handoff, destinations, "watch", recoveryWatchOptions).catch((error) => {
             api.logger.warn(`gateway recovery watch failed: ${String(error)}`);
           });
         }, Math.max(startupDelayMs, recoveryWatchDelayMs));
         schedule(() => {
-          maybeNotifyRecoveryWatch(api, handoff, channelIds, accountId, "final", recoveryWatchOptions).catch((error) => {
+          maybeNotifyRecoveryWatch(api, handoff, destinations, "final", recoveryWatchOptions).catch((error) => {
             api.logger.warn(`gateway recovery final watch failed: ${String(error)}`);
           });
         }, Math.max(startupDelayMs, recoveryFinalDelayMs));
