@@ -21,9 +21,9 @@ function cleanupInteractionState() {
   }
 }
 
-function encodeState(value) {
+function encodeState(value, { maxLength = MAX_INLINE_STATE_LENGTH } = {}) {
   const encoded = Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
-  if (encoded.length <= MAX_INLINE_STATE_LENGTH) return encoded;
+  if (encoded.length <= maxLength) return encoded;
   cleanupInteractionState();
   const key = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
   interactionState.set(key, { value, expiresAt: Date.now() + INTERACTION_STATE_TTL_MS });
@@ -66,6 +66,27 @@ function inputValue(inputs, action, key = "inputValue") {
   const found = Array.isArray(inputs) ? inputs.find((entry) => entry?.actionId === action) : undefined;
   const value = found?.[key] ?? found?.value ?? found?.inputValue ?? found?.text ?? "";
   return value ? String(value) : "";
+}
+
+function stateInputValue(stateValues, blockId, actionId) {
+  const action = stateValues?.[blockId]?.[actionId];
+  const value = action?.value ?? action?.selected_option?.value ?? action?.selected_date ?? action?.selected_time ?? "";
+  return value ? String(value) : "";
+}
+
+function modalInputValue(ctx, action, blockId = `${action}_block`) {
+  return inputValue(ctx?.interaction?.inputs, action) || stateInputValue(ctx?.interaction?.stateValues, blockId, action);
+}
+
+function modalPrivateMetadata(ctx) {
+  const raw = ctx?.interaction?.privateMetadata;
+  if (typeof raw !== "string" || !raw.trim()) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
 }
 
 function selectedValue(ctx) {
@@ -210,7 +231,7 @@ function searchModal({ kind, channelId, threadTs, userId }) {
     channelId,
     channelType: "channel",
     userId,
-    pluginInteractiveData: `${NAMESPACE}:submit-search:${kind}:${encodeState({ channelId, threadTs })}`
+    pluginInteractiveData: `${NAMESPACE}:submit-search:${kind}:${encodeState({ channelId, threadTs }, { maxLength: 2400 })}`
   };
   return {
     type: "modal",
@@ -551,10 +572,12 @@ async function postSearchResults(api, ctx, payload) {
   const parts = payload.split(":");
   const kind = parts[0] === "series" ? "series" : "movie";
   const state = decodeState(parts.slice(1).join(":"));
-  const query = inputValue(ctx?.interaction?.inputs, "query");
+  const metadata = modalPrivateMetadata(ctx);
+  const query = modalInputValue(ctx, "query");
   if (!query) throw new Error("Search modal is missing a title.");
-  const channel = state.channelId || ctx?.conversationId;
+  const channel = state.channelId || metadata.channelId || ctx?.conversationId;
   if (!channel) throw new Error("Search modal is missing a destination channel.");
+  api.logger.info?.(`media-requests-slack search start kind=${kind} channel=${channel} query=${JSON.stringify(query)}`);
   const pending = await slackApi("chat.postMessage", {
     channel,
     text: `Searching ${kind === "series" ? "TV" : "movies"} for ${query}...`,
@@ -571,10 +594,13 @@ async function postSearchResults(api, ctx, payload) {
     unfurl_links: false,
     unfurl_media: false
   });
+  api.logger.info?.(`media-requests-slack search posted kind=${kind} channel=${channel} results=${Array.isArray(result?.candidates) ? result.candidates.length : 0}`);
 }
 
 function submitSearchInBackground(api, ctx, value) {
-  const channelId = ctx?.conversationId;
+  const state = decodeState(String(value ?? "").split(":").slice(1).join(":"));
+  const metadata = modalPrivateMetadata(ctx);
+  const channelId = state.channelId || metadata.channelId || ctx?.conversationId;
   postSearchResults(api, ctx, value).catch(async (error) => {
     const text = `Media request search failed: ${error instanceof Error ? error.message : String(error)}`;
     if (channelId) await slackApi("chat.postMessage", { channel: channelId, text }).catch(() => {});
