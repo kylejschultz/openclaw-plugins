@@ -393,39 +393,51 @@ function previewBlocks(result) {
 }
 
 async function previewForRequest(api, request) {
-  if (request?.kind === "series" || request?.tvdbId) {
+  const hydrated = await hydrateRequest(api, request);
+  if (hydrated?.kind === "series" || hydrated?.tvdbId) {
     return callMediaTool(api, "preview_series_request", {
-      tvdbId: Number(request.tvdbId),
-      qualityProfileId: Number(request.qualityProfileId),
-      rootFolderPath: String(request.rootFolderPath ?? ""),
-      monitorMode: String(request.monitorMode ?? "all"),
-      seasonFolder: request.seasonFolder !== false,
-      searchNow: request.searchNow !== false,
-      tagIds: Array.isArray(request.tagIds) ? request.tagIds.map(Number).filter(Number.isFinite) : []
+      tvdbId: Number(hydrated.tvdbId),
+      qualityProfileId: Number(hydrated.qualityProfileId),
+      rootFolderPath: String(hydrated.rootFolderPath ?? ""),
+      monitorMode: String(hydrated.monitorMode ?? "all"),
+      seasonFolder: hydrated.seasonFolder !== false,
+      searchNow: hydrated.searchNow !== false,
+      tagIds: Array.isArray(hydrated.tagIds) ? hydrated.tagIds.map(Number).filter(Number.isFinite) : []
     });
   }
   return callMediaTool(api, "preview_movie_request", {
-    tmdbId: Number(request.tmdbId),
-    qualityProfileId: Number(request.qualityProfileId),
-    rootFolderPath: String(request.rootFolderPath ?? ""),
-    monitored: request.monitored !== false,
-    searchNow: request.searchNow !== false,
-    tagIds: Array.isArray(request.tagIds) ? request.tagIds.map(Number).filter(Number.isFinite) : []
+    tmdbId: Number(hydrated.tmdbId),
+    qualityProfileId: Number(hydrated.qualityProfileId),
+    rootFolderPath: String(hydrated.rootFolderPath ?? ""),
+    monitored: hydrated.monitored !== false,
+    searchNow: hydrated.searchNow !== false,
+    tagIds: Array.isArray(hydrated.tagIds) ? hydrated.tagIds.map(Number).filter(Number.isFinite) : []
   });
+}
+
+async function hydrateRequest(api, request) {
+  const kind = request?.kind === "series" || request?.tvdbId ? "series" : "movie";
+  const options = await callMediaTool(api, kind === "series" ? "sonarr_request_options" : "radarr_request_options");
+  const defaults = options?.requestDraft?.defaults && typeof options.requestDraft.defaults === "object"
+    ? options.requestDraft.defaults
+    : {};
+  const hydrated = { kind, ...defaults, ...(request && typeof request === "object" ? request : {}) };
+  if (!Number.isFinite(Number(hydrated.qualityProfileId))) {
+    throw new Error(`${kind === "series" ? "Sonarr" : "Radarr"} has no usable quality profile for this request.`);
+  }
+  if (!String(hydrated.rootFolderPath ?? "").trim()) {
+    throw new Error(`${kind === "series" ? "Sonarr" : "Radarr"} has no usable root folder for this request.`);
+  }
+  return hydrated;
 }
 
 async function previewForSelection(api, state) {
   if (state.request && typeof state.request === "object") return previewForRequest(api, state.request);
 
   const kind = state.kind === "series" ? "series" : "movie";
-  const options = await callMediaTool(api, kind === "series" ? "sonarr_request_options" : "radarr_request_options");
-  const defaults = options?.requestDraft?.defaults && typeof options.requestDraft.defaults === "object"
-    ? options.requestDraft.defaults
-    : {};
   const request = {
     kind,
-    ...(kind === "series" ? { tvdbId: Number(state.id) } : { tmdbId: Number(state.id) }),
-    ...defaults
+    ...(kind === "series" ? { tvdbId: Number(state.id) } : { tmdbId: Number(state.id) })
   };
   return previewForRequest(api, request);
 }
@@ -519,7 +531,6 @@ async function postSearchResults(api, ctx, payload) {
   const blocks = searchResultBlocks({ kind, query, result });
   await slackApi("chat.postMessage", {
     channel: state.channelId || ctx?.conversationId,
-    thread_ts: state.threadTs || undefined,
     text: `${kind === "series" ? "TV" : "Movie"} search results for ${query}`,
     blocks,
     unfurl_links: false,
