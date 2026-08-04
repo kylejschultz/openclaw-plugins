@@ -227,12 +227,20 @@ function candidateDescription(kind, candidate) {
 
 function searchResultBlocks({ kind, query, result }) {
   const candidates = Array.isArray(result?.candidates) ? result.candidates : [];
+  const defaults = result?.requestDraft?.defaults && typeof result.requestDraft.defaults === "object"
+    ? result.requestDraft.defaults
+    : {};
   const options = candidates.slice(0, 25).map((candidate) => {
     const id = candidateId(kind, candidate);
     if (!id) return undefined;
+    const request = {
+      kind,
+      ...(kind === "series" ? { tvdbId: Number(id) } : { tmdbId: Number(id) }),
+      ...defaults
+    };
     return {
       text: plain(candidateLabel(candidate)),
-      value: encodeState({ kind, id }),
+      value: encodeState({ kind, id, request }),
       ...(candidateDescription(kind, candidate) ? { description: plain(candidateDescription(kind, candidate)) } : {})
     };
   }).filter(Boolean);
@@ -407,8 +415,19 @@ async function previewForRequest(api, request) {
 }
 
 async function previewForSelection(api, state) {
-  if (state.kind === "series") return previewForRequest(api, { kind: "series", tvdbId: Number(state.id) });
-  return previewForRequest(api, { kind: "movie", tmdbId: Number(state.id) });
+  if (state.request && typeof state.request === "object") return previewForRequest(api, state.request);
+
+  const kind = state.kind === "series" ? "series" : "movie";
+  const options = await callMediaTool(api, kind === "series" ? "sonarr_request_options" : "radarr_request_options");
+  const defaults = options?.requestDraft?.defaults && typeof options.requestDraft.defaults === "object"
+    ? options.requestDraft.defaults
+    : {};
+  const request = {
+    kind,
+    ...(kind === "series" ? { tvdbId: Number(state.id) } : { tmdbId: Number(state.id) }),
+    ...defaults
+  };
+  return previewForRequest(api, request);
 }
 
 function requestKind(request) {
