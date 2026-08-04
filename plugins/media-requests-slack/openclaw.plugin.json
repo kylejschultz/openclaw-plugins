@@ -1,0 +1,27 @@
+{
+  "id": "media-requests-slack",
+  "name": "Media Requests Slack",
+  "description": "Slack modal workflow for Radarr and Sonarr requests through media-mcp.",
+  "version": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "mediaMcpUrl": {
+        "type": "string",
+        "description": "media-mcp Streamable HTTP endpoint."
+      },
+      "panelChannelId": {
+        "type": "string",
+        "description": "Optional Slack channel id where the request panel should be posted on startup."
+      },
+      "autoPost": {
+        "type": "boolean",
+        "description": "Post a request panel to panelChannelId on startup."
+      }
+    }
+  },
+  "activation": {
+    "onStartup": true
+  }
+}
