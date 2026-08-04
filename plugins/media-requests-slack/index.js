@@ -259,6 +259,25 @@ function panelPayload() {
   };
 }
 
+function clearButton() {
+  return {
+    type: "button",
+    text: plain("Clear"),
+    action_id: actionId("clear"),
+    value: "clear"
+  };
+}
+
+function clearBlocks() {
+  return [
+    {
+      type: "actions",
+      block_id: "media_request_clear",
+      elements: [clearButton()]
+    }
+  ];
+}
+
 function searchModal({ kind, channelId, threadTs, userId }) {
   const isSeries = kind === "series";
   const metadata = {
@@ -329,7 +348,7 @@ function searchResultBlocks({ kind, query, result }) {
   if (!options.length) {
     return [
       { type: "section", text: mrkdwn(`*No ${isSeries ? "TV" : "movie"} results for:* ${truncate(query, 120)}`) },
-      ...panelBlocks().slice(1)
+      ...clearBlocks()
     ];
   }
   return [
@@ -349,7 +368,7 @@ function searchResultBlocks({ kind, query, result }) {
         }
       ]
     },
-    ...panelBlocks().slice(1)
+    ...clearBlocks()
   ];
 }
 
@@ -466,11 +485,65 @@ function previewBlocks(result) {
           title: candidate.title,
           year: candidate.year
         })
-      }
+      },
+      clearButton()
     ]
   });
-  blocks.push(...panelBlocks().slice(1));
   return blocks;
+}
+
+function followStateForRequest({ kind, request, title, year, requestedAt }) {
+  return {
+    service: kind === "series" ? "sonarr" : "radarr",
+    tmdbId: request.tmdbId,
+    tvdbId: request.tvdbId,
+    title,
+    year,
+    requestedAt
+  };
+}
+
+function receiptLines({ request, preview, requestedAt }) {
+  const { draft } = requestState(preview);
+  const kind = requestKind(request);
+  const quality = optionLabel(draft.qualityProfileOptions, request.qualityProfileId, request.qualityProfileId ?? "default");
+  const root = optionLabel(draft.rootFolderOptions, request.rootFolderPath, request.rootFolderPath ?? "default");
+  const monitor = optionLabel(draft.monitorOptions, request.monitorMode, request.monitorMode ?? "all");
+  return [
+    `Quality: ${quality}`,
+    `Root: ${root}`,
+    kind === "series" ? `Monitor: ${monitor}` : `Monitored: ${request.monitored !== false ? "yes" : "no"}`,
+    kind === "series" ? `Season folders: ${request.seasonFolder !== false ? "yes" : "no"}` : undefined,
+    `Search now: ${request.searchNow !== false ? "yes" : "no"}`,
+    requestedAt ? `Requested: ${requestedAt}` : undefined
+  ].filter(Boolean);
+}
+
+function requestResultBlocks({ request, preview, result, dryRun, requestedAt }) {
+  const kind = requestKind(request);
+  const candidate = preview?.requestDraft?.selectedCandidate ?? {};
+  const title = result?.series?.title ?? result?.movie?.title ?? candidate.title ?? "Selected title";
+  const year = result?.series?.year ?? result?.movie?.year ?? candidate.year;
+  const summary = dryRun
+    ? "Dry run only. ALLOW_REQUESTS is false on media-mcp."
+    : (result?.summary ?? `${title} was requested.`);
+  const lines = receiptLines({ request, preview, requestedAt }).join("\n");
+  return [
+    { type: "section", text: mrkdwn(`*${dryRun ? "Request previewed" : "Request submitted"}: ${truncate(title, 120)}*\n${truncate(summary, 300)}\n\`\`\`${lines}\`\`\``) },
+    {
+      type: "actions",
+      block_id: "media_request_after_submit",
+      elements: [
+        {
+          type: "button",
+          text: plain("Follow Status"),
+          action_id: actionId("follow"),
+          value: encodeState(followStateForRequest({ kind, request, title, year, requestedAt }))
+        },
+        clearButton()
+      ]
+    }
+  ];
 }
 
 async function previewForRequest(api, request) {
@@ -531,43 +604,13 @@ async function requestMedia(api, request) {
   const kind = requestKind(request);
   const preview = await previewForRequest(api, request);
   const input = preview?.requestDraft?.request;
-  if (!preview?.requestDraft?.writeGate?.enabled) return { preview, result: undefined, dryRun: true };
+  const requestedAt = new Date().toISOString();
+  if (!preview?.requestDraft?.writeGate?.enabled) return { preview, result: undefined, dryRun: true, requestedAt };
   if (!input || typeof input !== "object") throw new Error("Preview did not return a request payload.");
   const result = kind === "series"
     ? await callMediaTool(api, "request_series", input)
     : await callMediaTool(api, "request_movie", input);
-  return { preview, result, dryRun: false };
-}
-
-function requestResultBlocks({ request, preview, result, dryRun }) {
-  const kind = requestKind(request);
-  const candidate = preview?.requestDraft?.selectedCandidate ?? {};
-  const title = result?.series?.title ?? result?.movie?.title ?? candidate.title ?? "Selected title";
-  const summary = dryRun
-    ? "Dry run only. ALLOW_REQUESTS is false on media-mcp."
-    : (result?.summary ?? `${title} was requested.`);
-  return [
-    { type: "section", text: mrkdwn(`*${dryRun ? "Request previewed" : "Request submitted"}: ${truncate(title, 120)}*\n${truncate(summary, 400)}`) },
-    {
-      type: "actions",
-      block_id: "media_request_after_submit",
-      elements: [
-        {
-          type: "button",
-          text: plain("Follow Status"),
-          action_id: actionId("follow"),
-          value: encodeState({
-            service: kind === "series" ? "sonarr" : "radarr",
-            tmdbId: request.tmdbId,
-            tvdbId: request.tvdbId,
-            title,
-            year: result?.series?.year ?? result?.movie?.year ?? candidate.year
-          })
-        }
-      ]
-    },
-    ...panelBlocks().slice(1)
-  ];
+  return { preview, result, dryRun: false, requestedAt };
 }
 
 function followBlocks(status) {
@@ -581,7 +624,7 @@ function followBlocks(status) {
   ].filter(Boolean).join("\n");
   return [
     { type: "section", text: mrkdwn(`*Request status: ${truncate(follow.title ?? status?.summary ?? "Media request", 120)}*\n${truncate(status?.summary ?? "Status checked.", 300)}\n\`\`\`${lines}\`\`\``) },
-    ...panelBlocks().slice(1)
+    ...clearBlocks()
   ];
 }
 
@@ -683,9 +726,21 @@ async function handleFollow(api, ctx, encoded) {
     tmdbId: Number(state.tmdbId) || undefined,
     tvdbId: Number(state.tvdbId) || undefined,
     title: state.title || undefined,
-    year: Number(state.year) || undefined
+    year: Number(state.year) || undefined,
+    requestedAt: state.requestedAt || undefined
   });
   await updateInteractionMessage(api, ctx, { text: "Media request status", blocks: followBlocks(status) });
+}
+
+async function handleClear(api, ctx) {
+  const target = interactionUpdateTarget(ctx);
+  if (!target.channel || !target.ts) throw new Error("Slack interaction is missing the message clear target.");
+  try {
+    await slackApi("chat.delete", target);
+  } catch (error) {
+    api.logger.warn(`media-requests-slack clear failed: ${error instanceof Error ? error.message : String(error)}`);
+    await updateInteractionMessage(api, ctx, { text: "Media request cleared", blocks: [] });
+  }
 }
 
 function parsePayload(payload) {
@@ -712,6 +767,7 @@ function registerInteractive(api) {
         else if (action === "toggle") await handleToggle(api, ctx, value);
         else if (action === "request") await handleRequest(api, ctx, value);
         else if (action === "follow") await handleFollow(api, ctx, value);
+        else if (action === "clear") await handleClear(api, ctx);
         else return { handled: false };
         return { handled: true };
       } catch (error) {
