@@ -407,8 +407,8 @@ function previewBlocks(result) {
       text: mrkdwn(`*${kind === "series" ? "TV" : "Movie"} request preview: ${truncate(title, 120)}*\n${truncate(result?.summary ?? "Preview ready.", 240)}\n\`\`\`${details}\`\`\``)
     }
   ];
-  for (let i = 0; i < optionElements.length; i += 5) {
-    blocks.push({ type: "actions", block_id: `media_request_options_${i}`, elements: optionElements.slice(i, i + 5) });
+  for (let i = 0; i < optionElements.length; i += 1) {
+    blocks.push({ type: "actions", block_id: `media_request_option_${i}`, elements: [optionElements[i]] });
   }
   blocks.push({
     type: "actions",
