@@ -4,3 +4,4 @@ node_modules/
 
 # Runtime state
 restart-notifier-state.json
+media-requests-slack-state.json

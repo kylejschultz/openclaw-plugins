@@ -1,12 +1,14 @@
-import { join } from "node:path";
-import { pathToFileURL } from "node:url";
-import { readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { readFile, writeFile } from "node:fs/promises";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 
 const NAMESPACE = "media-requests";
 const DEFAULT_MEDIA_MCP_URL = "http://10.10.10.10:3000/mcp";
 const MEDIA_MCP_DIR = "/Users/server/.openclaw/workspace/media-mcp";
 const VERSION = "0.1.0";
+const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
+const STATE_PATH = join(PLUGIN_DIR, "media-requests-slack-state.json");
 let mediaMcpSdkPromise;
 
 function encodeState(value) {
@@ -64,6 +66,43 @@ async function slackApi(method, body) {
   return json;
 }
 
+async function readState() {
+  try {
+    const parsed = JSON.parse(await readFile(STATE_PATH, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+async function writeState(state) {
+  await writeFile(STATE_PATH, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+}
+
+async function ensurePanelMessage(api, reason = "startup") {
+  const config = api.pluginConfig ?? {};
+  const channel = typeof config.panelChannelId === "string" ? config.panelChannelId.trim() : "";
+  if (!channel) return { ok: false, skipped: "panelChannelId is not set" };
+
+  const state = await readState();
+  const knownTs = state.channel === channel && typeof state.ts === "string" ? state.ts : "";
+  if (knownTs) {
+    try {
+      const updated = await slackApi("chat.update", { channel, ts: knownTs, ...panelPayload() });
+      const nextState = { channel, ts: updated.ts ?? knownTs, updatedAt: new Date().toISOString(), reason, mode: "update" };
+      await writeState(nextState);
+      return { ok: true, ...nextState };
+    } catch (error) {
+      api.logger.warn(`media-requests-slack panel update failed; posting replacement: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  const posted = await slackApi("chat.postMessage", { channel, ...panelPayload() });
+  const nextState = { channel, ts: posted.ts, updatedAt: new Date().toISOString(), reason, mode: "post" };
+  await writeState(nextState);
+  return { ok: true, ...nextState };
+}
+
 async function loadMediaMcpSdk() {
   if (mediaMcpSdkPromise) return mediaMcpSdkPromise;
   mediaMcpSdkPromise = Promise.all([
@@ -104,7 +143,7 @@ function panelBlocks() {
     },
     {
       type: "actions",
-      block_id: "media_requests_home",
+      block_id: "media_requests_movie",
       elements: [
         {
           type: "button",
@@ -112,7 +151,13 @@ function panelBlocks() {
           style: "primary",
           action_id: actionId("open-search"),
           value: "movie"
-        },
+        }
+      ]
+    },
+    {
+      type: "actions",
+      block_id: "media_requests_tv",
+      elements: [
         {
           type: "button",
           text: plain("Request TV"),
@@ -555,7 +600,15 @@ function registerCommand(api) {
     description: "Post the Slack media request panel.",
     acceptsArgs: false,
     requireAuth: true,
-    handler: async () => panelPayload()
+    handler: async () => {
+      const result = await ensurePanelMessage(api, "command");
+      return {
+        continueAgent: false,
+        text: result.ok
+          ? `Media request panel ${result.mode === "update" ? "refreshed" : "posted"}.`
+          : `Media request panel skipped: ${result.skipped ?? "unknown reason"}.`
+      };
+    }
   });
 }
 
@@ -575,10 +628,7 @@ export default definePluginEntry({
     });
     const config = api.pluginConfig ?? {};
     if (config.autoPost === true && typeof config.panelChannelId === "string" && config.panelChannelId.trim()) {
-      slackApi("chat.postMessage", {
-        channel: config.panelChannelId.trim(),
-        ...panelPayload()
-      }).catch((error) => {
+      ensurePanelMessage(api, "startup").catch((error) => {
         api.logger.warn(`media-requests-slack autopost failed: ${error instanceof Error ? error.message : String(error)}`);
       });
     }
