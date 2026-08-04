@@ -113,6 +113,40 @@ async function slackApi(method, body) {
   return json;
 }
 
+function interactionUpdateTarget(ctx) {
+  return {
+    channel: ctx?.conversationId,
+    ts: ctx?.interaction?.messageTs
+  };
+}
+
+function blockSummary(blocks) {
+  return (Array.isArray(blocks) ? blocks : []).map((block, index) => ({
+    index,
+    type: block?.type,
+    block_id: block?.block_id,
+    textLength: block?.text?.text ? String(block.text.text).length : undefined,
+    elementTypes: Array.isArray(block?.elements) ? block.elements.map((element) => element?.type) : undefined
+  }));
+}
+
+async function updateInteractionMessage(api, ctx, { text, blocks }) {
+  const target = interactionUpdateTarget(ctx);
+  if (!target.channel || !target.ts) throw new Error("Slack interaction is missing the message update target.");
+  try {
+    await slackApi("chat.update", {
+      ...target,
+      text,
+      blocks,
+      unfurl_links: false,
+      unfurl_media: false
+    });
+  } catch (error) {
+    api.logger.warn(`media-requests-slack update failed: ${error instanceof Error ? error.message : String(error)} blocks=${JSON.stringify(blockSummary(blocks))}`);
+    throw error;
+  }
+}
+
 async function readState() {
   try {
     const parsed = JSON.parse(await readFile(STATE_PATH, "utf8"));
@@ -611,7 +645,7 @@ function submitSearchInBackground(api, ctx, value) {
 async function handlePreview(api, ctx) {
   const state = decodeState(selectedOrActionValue(ctx));
   const preview = await previewForSelection(api, state);
-  await ctx.respond.editMessage({
+  await updateInteractionMessage(api, ctx, {
     text: "Media request preview",
     blocks: previewBlocks(preview)
   });
@@ -621,7 +655,7 @@ async function handleOption(api, ctx) {
   const state = decodeState(selectedOrActionValue(ctx));
   const request = { ...(state.request ?? {}), [state.fieldId]: state.value };
   const preview = await previewForRequest(api, request);
-  await ctx.respond.editMessage({ text: "Media request preview", blocks: previewBlocks(preview) });
+  await updateInteractionMessage(api, ctx, { text: "Media request preview", blocks: previewBlocks(preview) });
 }
 
 async function handleToggle(api, ctx, encoded) {
@@ -629,14 +663,14 @@ async function handleToggle(api, ctx, encoded) {
   const current = state.request?.[state.fieldId] !== false;
   const request = { ...(state.request ?? {}), [state.fieldId]: !current };
   const preview = await previewForRequest(api, request);
-  await ctx.respond.editMessage({ text: "Media request preview", blocks: previewBlocks(preview) });
+  await updateInteractionMessage(api, ctx, { text: "Media request preview", blocks: previewBlocks(preview) });
 }
 
 async function handleRequest(api, ctx, encoded) {
   const state = decodeState(encoded);
   const request = state.request ?? {};
   const requested = await requestMedia(api, request);
-  await ctx.respond.editMessage({
+  await updateInteractionMessage(api, ctx, {
     text: requested.dryRun ? "Media request dry run" : "Media request submitted",
     blocks: requestResultBlocks({ request, ...requested })
   });
@@ -651,7 +685,7 @@ async function handleFollow(api, ctx, encoded) {
     title: state.title || undefined,
     year: Number(state.year) || undefined
   });
-  await ctx.respond.editMessage({ text: "Media request status", blocks: followBlocks(status) });
+  await updateInteractionMessage(api, ctx, { text: "Media request status", blocks: followBlocks(status) });
 }
 
 function parsePayload(payload) {
