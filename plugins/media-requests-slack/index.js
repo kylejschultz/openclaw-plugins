@@ -9,15 +9,36 @@ const MEDIA_MCP_DIR = "/Users/server/.openclaw/workspace/media-mcp";
 const VERSION = "0.1.0";
 const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
 const STATE_PATH = join(PLUGIN_DIR, "media-requests-slack-state.json");
+const INTERACTION_STATE_TTL_MS = 30 * 60 * 1000;
+const MAX_INLINE_STATE_LENGTH = 72;
 let mediaMcpSdkPromise;
+const interactionState = new Map();
+
+function cleanupInteractionState() {
+  const now = Date.now();
+  for (const [key, entry] of interactionState.entries()) {
+    if (!entry || entry.expiresAt <= now) interactionState.delete(key);
+  }
+}
 
 function encodeState(value) {
-  return Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
+  const encoded = Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
+  if (encoded.length <= MAX_INLINE_STATE_LENGTH) return encoded;
+  cleanupInteractionState();
+  const key = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+  interactionState.set(key, { value, expiresAt: Date.now() + INTERACTION_STATE_TTL_MS });
+  return `ref:${key}`;
 }
 
 function decodeState(value) {
+  const raw = String(value ?? "");
+  if (raw.startsWith("ref:")) {
+    cleanupInteractionState();
+    const entry = interactionState.get(raw.slice(4));
+    return entry?.value && typeof entry.value === "object" && !Array.isArray(entry.value) ? entry.value : {};
+  }
   try {
-    const parsed = JSON.parse(Buffer.from(String(value ?? ""), "base64url").toString("utf8"));
+    const parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf8"));
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
   } catch {
     return {};
@@ -43,11 +64,16 @@ function truncate(value, max = 280) {
 
 function inputValue(inputs, action, key = "inputValue") {
   const found = Array.isArray(inputs) ? inputs.find((entry) => entry?.actionId === action) : undefined;
-  return found?.[key] ? String(found[key]) : "";
+  const value = found?.[key] ?? found?.value ?? found?.inputValue ?? found?.text ?? "";
+  return value ? String(value) : "";
 }
 
 function selectedValue(ctx) {
   return Array.isArray(ctx?.interaction?.selectedValues) ? ctx.interaction.selectedValues[0] : undefined;
+}
+
+function selectedOrActionValue(ctx) {
+  return selectedValue(ctx) ?? ctx?.interaction?.value;
 }
 
 async function slackApi(method, body) {
@@ -240,7 +266,7 @@ function searchResultBlocks({ kind, query, result }) {
     };
     return {
       text: plain(candidateLabel(candidate)),
-      value: encodeState({ kind, id, request }),
+      value: encodeState({ kind, id }),
       ...(candidateDescription(kind, candidate) ? { description: plain(candidateDescription(kind, candidate)) } : {})
     };
   }).filter(Boolean);
@@ -527,10 +553,19 @@ async function postSearchResults(api, ctx, payload) {
   const state = decodeState(parts.slice(1).join(":"));
   const query = inputValue(ctx?.interaction?.inputs, "query");
   if (!query) throw new Error("Search modal is missing a title.");
+  const channel = state.channelId || ctx?.conversationId;
+  if (!channel) throw new Error("Search modal is missing a destination channel.");
+  const pending = await slackApi("chat.postMessage", {
+    channel,
+    text: `Searching ${kind === "series" ? "TV" : "movies"} for ${query}...`,
+    unfurl_links: false,
+    unfurl_media: false
+  });
   const result = await callMediaTool(api, kind === "series" ? "search_series" : "search_movie", { query, limit: 10 });
   const blocks = searchResultBlocks({ kind, query, result });
-  await slackApi("chat.postMessage", {
-    channel: state.channelId || ctx?.conversationId,
+  await slackApi("chat.update", {
+    channel,
+    ts: pending.ts,
     text: `${kind === "series" ? "TV" : "Movie"} search results for ${query}`,
     blocks,
     unfurl_links: false,
@@ -538,8 +573,17 @@ async function postSearchResults(api, ctx, payload) {
   });
 }
 
+function submitSearchInBackground(api, ctx, value) {
+  const channelId = ctx?.conversationId;
+  postSearchResults(api, ctx, value).catch(async (error) => {
+    const text = `Media request search failed: ${error instanceof Error ? error.message : String(error)}`;
+    if (channelId) await slackApi("chat.postMessage", { channel: channelId, text }).catch(() => {});
+    api.logger.warn(text);
+  });
+}
+
 async function handlePreview(api, ctx) {
-  const state = decodeState(selectedValue(ctx));
+  const state = decodeState(selectedOrActionValue(ctx));
   const preview = await previewForSelection(api, state);
   await ctx.respond.editMessage({
     text: "Media request preview",
@@ -548,7 +592,7 @@ async function handlePreview(api, ctx) {
 }
 
 async function handleOption(api, ctx) {
-  const state = decodeState(selectedValue(ctx));
+  const state = decodeState(selectedOrActionValue(ctx));
   const request = { ...(state.request ?? {}), [state.fieldId]: state.value };
   const preview = await previewForRequest(api, request);
   await ctx.respond.editMessage({ text: "Media request preview", blocks: previewBlocks(preview) });
@@ -602,7 +646,7 @@ function registerInteractive(api) {
       const { action, value } = parsePayload(ctx?.interaction?.payload);
       try {
         if (action === "open-search") await handleOpenSearch(api, ctx, value);
-        else if (action === "submit-search") await postSearchResults(api, ctx, value);
+        else if (action === "submit-search") submitSearchInBackground(api, ctx, value);
         else if (action === "preview") await handlePreview(api, ctx);
         else if (action === "option") await handleOption(api, ctx);
         else if (action === "toggle") await handleToggle(api, ctx, value);
